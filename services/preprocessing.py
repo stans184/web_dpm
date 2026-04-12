@@ -1,16 +1,10 @@
+"""DPM 계산 전처리 로직 모음."""
+
 import pandas as pd
 
 
-# preprocessing 계층은 raw data를 계산 가능한 형태로 다듬는 역할을 한다.
-# 현재 요구사항은 다음 3단계다.
-# 1. fab_value 기준 3*IQR outlier 제거
-# 2. ppid / lot_type / lot_filter 기준 filtering
-# 3. incoming 데이터에 lot_id 기준 lot mean 값 추가
-
-
 def remove_fab_value_outliers_iqr(df: pd.DataFrame) -> pd.DataFrame:
-    # fab_value 분포에서 3*IQR 범위를 벗어나는 값을 제거한다.
-    # 데이터가 없거나 필요한 컬럼이 없으면 원본 형태를 최대한 유지해서 반환한다.
+    """fab_value 기준 3배 IQR 바깥 값을 제거한다."""
     if df is None or df.empty or "fab_value" not in df.columns:
         return df.copy() if df is not None else pd.DataFrame()
 
@@ -24,9 +18,7 @@ def remove_fab_value_outliers_iqr(df: pd.DataFrame) -> pd.DataFrame:
 
     lower_bound = q1 - 3 * iqr
     upper_bound = q3 + 3 * iqr
-    filtered_df = working_df[
-        working_df["fab_value"].between(lower_bound, upper_bound, inclusive="both")
-    ]
+    filtered_df = working_df[working_df["fab_value"].between(lower_bound, upper_bound, inclusive="both")]
     return filtered_df.reset_index(drop=True)
 
 
@@ -34,12 +26,8 @@ def preprocess_comparison_trend_data(
     incoming_df: pd.DataFrame,
     target_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # incoming vs target comparison scatter는 raw trend 전체를 그대로 쓰지 않고
-    # 양쪽 dataframe에 3*IQR outlier 제거만 적용한 뒤 비교하는 용도로 사용한다.
-    # 이 로직을 view가 아니라 preprocessing 서비스 안에 두어 역할을 분리한다.
-    filtered_incoming_df = remove_fab_value_outliers_iqr(incoming_df)
-    filtered_target_df = remove_fab_value_outliers_iqr(target_df)
-    return filtered_incoming_df, filtered_target_df
+    """비교 산점도용 incoming/target 데이터를 정리한다."""
+    return remove_fab_value_outliers_iqr(incoming_df), remove_fab_value_outliers_iqr(target_df)
 
 
 def filter_trend_data(
@@ -49,17 +37,14 @@ def filter_trend_data(
     lot_type: str = "",
     lot_filter: str = "",
 ) -> pd.DataFrame:
-    # DPM setting popup에서 받은 ppid / lot_type / lot_filter 조건으로
-    # raw trend data를 한 번 더 세밀하게 걸러낸다.
+    """화면 입력 조건으로 추세 데이터를 필터링한다."""
     if df is None or df.empty:
         return pd.DataFrame(columns=df.columns if df is not None else None)
 
     working_df = df.copy()
 
     if ppid and "ppid" in working_df.columns:
-        working_df = working_df[
-            working_df["ppid"].astype(str).str.contains(ppid, case=False, na=False)
-        ]
+        working_df = working_df[working_df["ppid"].astype(str).str.contains(ppid, case=False, na=False)]
 
     normalized_lot_type = str(lot_type).strip().lower()
     if normalized_lot_type == "all":
@@ -73,21 +58,22 @@ def filter_trend_data(
         ]
 
     if lot_filter:
-        # lot_filter는 lot_id 또는 root_lot_id 어느 쪽에도 걸릴 수 있도록 처리한다.
+        # 사용자는 lot_id와 root_lot_id 둘 중 어느 값으로도 검색할 수 있다.
         lot_mask = pd.Series(False, index=working_df.index)
         for col in ["lot_id", "root_lot_id"]:
             if col in working_df.columns:
                 lot_mask = lot_mask | working_df[col].astype(str).str.contains(
-                    lot_filter, case=False, na=False
+                    lot_filter,
+                    case=False,
+                    na=False,
                 )
         working_df = working_df[lot_mask]
 
     return working_df.reset_index(drop=True)
 
 
-def add_lot_mean_fab_value(df: pd.DataFrame) -> pd.DataFrame:
-    # incoming dataframe에서는 같은 lot_id 묶음별 fab_value 평균을 계산해서
-    # lot_mean_fab_value 컬럼으로 추가한다.
+def add_lot_subitem_values(df: pd.DataFrame) -> pd.DataFrame:
+    """lot 단위 집계 컬럼을 추가한다."""
     if df is None or df.empty:
         return pd.DataFrame(columns=df.columns if df is not None else None)
 
@@ -95,7 +81,12 @@ def add_lot_mean_fab_value(df: pd.DataFrame) -> pd.DataFrame:
     if "lot_id" not in working_df.columns or "fab_value" not in working_df.columns:
         return working_df.reset_index(drop=True)
 
-    working_df["lot_mean_fab_value"] = working_df.groupby("lot_id")["fab_value"].transform("mean")
+    grouped = working_df.groupby("lot_id")["fab_value"]
+    working_df["lot_avg_fab_value"] = grouped.transform("mean")
+    working_df["lot_std_fab_value"] = grouped.transform("std").fillna(0.0)
+    working_df["lot_min_fab_value"] = grouped.transform("min")
+    working_df["lot_max_fab_value"] = grouped.transform("max")
+    working_df["lot_range_fab_value"] = working_df["lot_max_fab_value"] - working_df["lot_min_fab_value"]
     return working_df.reset_index(drop=True)
 
 
@@ -105,10 +96,9 @@ def preprocess_trend_data(
     ppid: str = "",
     lot_type: str = "",
     lot_filter: str = "",
-    add_lot_mean: bool = False,
+    add_lot_subitems: bool = False,
 ) -> pd.DataFrame:
-    # preprocessing의 메인 진입 함수다.
-    # 서비스 순서를 한 곳에 모아 두면 뷰에서는 이 함수만 호출하면 된다.
+    """단일 추세 데이터에 대한 표준 전처리를 수행한다."""
     processed_df = remove_fab_value_outliers_iqr(df)
     processed_df = filter_trend_data(
         processed_df,
@@ -117,8 +107,8 @@ def preprocess_trend_data(
         lot_filter=lot_filter,
     )
 
-    if add_lot_mean:
-        processed_df = add_lot_mean_fab_value(processed_df)
+    if add_lot_subitems:
+        processed_df = add_lot_subitem_values(processed_df)
 
     return processed_df.reset_index(drop=True)
 
@@ -128,25 +118,19 @@ def preprocess_dpm_input_data(
     df_target: pd.DataFrame,
     inputs: dict,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # DPM 계산 직전에 사용하는 메인 preprocessing 진입 함수다.
-    # get_data.py에서 불러온 raw dataframe을 받아 아래 순서로 처리한다.
-    # 1. df_incoming, df_target 각각 fab_value 기준 3*IQR outlier 제거
-    # 2. df_incoming은 incoming ppid / incoming lot type / incoming lot filter 기준 filtering
-    # 3. df_target은 target ppid / target lot type 기준 filtering
-    # 4. df_incoming에는 lot_id 기준 fab_value 평균 컬럼(lot_mean_fab_value) 추가
-    # 이렇게 만들어진 결과를 dpm_calculation.py에 전달한다.
+    """계산 단계 직전에 incoming/target 데이터를 정리한다."""
     processed_incoming_df = preprocess_trend_data(
         df_incoming,
         ppid=inputs.get("incoming_ppid", ""),
         lot_type=inputs.get("incoming_lot_type", ""),
         lot_filter=inputs.get("incoming_lot_filter", ""),
-        add_lot_mean=True,
+        add_lot_subitems=True,
     )
     processed_target_df = preprocess_trend_data(
         df_target,
         ppid=inputs.get("target_ppid", ""),
         lot_type=inputs.get("target_lot_type", ""),
         lot_filter="",
-        add_lot_mean=False,
+        add_lot_subitems=False,
     )
     return processed_incoming_df, processed_target_df

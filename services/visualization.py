@@ -1,16 +1,15 @@
+"""DPM 결과를 Plotly Figure로 변환하는 시각화 모듈."""
+
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
 
-# visualization 계층은 dataframe을 plotly figure로 변환하는 역할만 담당한다.
-# 데이터 가공과 계산 로직은 여기서 하지 않고, 시각화에 필요한 최소 join 정도만 수행한다.
-
-
 def _safe_color_column(df: pd.DataFrame, preferred_column: str) -> str | None:
-    # 사용자가 선택한 legend 컬럼이 없을 수도 있으므로
-    # 대체 가능한 컬럼을 순서대로 찾아서 반환한다.
+    """요청한 범례 컬럼이 없을 때 사용할 대체 컬럼을 찾는다."""
     candidate_columns = [preferred_column, "ppid", "lot_type", "item_id", "root_lot_id"]
     for col in candidate_columns:
         if col in df.columns:
@@ -18,15 +17,19 @@ def _safe_color_column(df: pd.DataFrame, preferred_column: str) -> str | None:
     return None
 
 
+def _build_empty_figure(title: str, message: str = "데이터가 없습니다.") -> go.Figure:
+    """데이터가 없을 때 보여줄 빈 Figure를 만든다."""
+    fig = go.Figure()
+    fig.update_layout(title=title)
+    fig.add_annotation(text=message, x=0.5, y=0.5, showarrow=False)
+    return fig
+
+
 def build_trend_scatter(df: pd.DataFrame, title: str, legend_column: str = "ppid") -> go.Figure:
-    # incoming / target metro trend scatterplot을 생성한다.
-    # x축은 tkout_time, y축은 fab_value, color는 사용자가 선택한 legend 기준이다.
+    """원본 incoming/target 추세 산점도를 만든다."""
     working_df = df.copy() if df is not None else pd.DataFrame()
     if working_df.empty:
-        fig = go.Figure()
-        fig.update_layout(title=title)
-        fig.add_annotation(text="No data", x=0.5, y=0.5, showarrow=False)
-        return fig
+        return _build_empty_figure(title)
 
     color_col = _safe_color_column(working_df, legend_column)
     fig = px.scatter(
@@ -49,27 +52,13 @@ def join_incoming_target_for_comparison(
     incoming_df: pd.DataFrame,
     target_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    # incoming / target raw dataframe을
-    # root_lot_id + wafer_id 기준으로 inner join해서 비교용 데이터셋을 만든다.
+    """incoming과 target을 wafer 단위로 연결한다."""
     if incoming_df is None or target_df is None or incoming_df.empty or target_df.empty:
         return pd.DataFrame()
 
-    incoming_cols = [
-        "root_lot_id",
-        "wafer_id",
-        "fab_value",
-        "ppid",
-        "lot_type",
-        "item_id",
-    ]
-    target_cols = [
-        "root_lot_id",
-        "wafer_id",
-        "fab_value",
-        "ppid",
-        "lot_type",
-        "item_id",
-    ]
+    incoming_cols = ["root_lot_id", "wafer_id", "fab_value", "ppid", "lot_type", "item_id"]
+    target_cols = ["root_lot_id", "wafer_id", "fab_value", "ppid", "lot_type", "item_id"]
+
     incoming_base = incoming_df[[col for col in incoming_cols if col in incoming_df.columns]].copy()
     target_base = target_df[[col for col in target_cols if col in target_df.columns]].copy()
 
@@ -86,14 +75,9 @@ def build_comparison_scatter_with_regression(
     joined_df: pd.DataFrame,
     legend_column: str = "ppid_incoming",
 ) -> tuple[go.Figure, float | None]:
-    # join된 incoming / target 데이터에서 비교 scatterplot을 만들고
-    # 회귀선을 추가한 뒤 Pearson R^2 값을 계산한다.
-    # 또한 회귀식과 R^2를 그래프 내부 annotation으로 표시한다.
+    """incoming/target 비교 산점도와 회귀선을 만든다."""
     if joined_df is None or joined_df.empty:
-        fig = go.Figure()
-        fig.update_layout(title="Incoming vs Target")
-        fig.add_annotation(text="No joined data", x=0.5, y=0.5, showarrow=False)
-        return fig, None
+        return _build_empty_figure("Incoming vs Target", "조인된 데이터가 없습니다."), None
 
     color_col = _safe_color_column(joined_df, legend_column)
     fig = px.scatter(
@@ -106,8 +90,8 @@ def build_comparison_scatter_with_regression(
 
     x = joined_df["fab_value_incoming"].astype(float)
     y = joined_df["fab_value_target"].astype(float)
+    annotation_text = "<b>회귀선을 계산할 수 없습니다.</b>"
 
-    annotation_text = "<b>Regression unavailable</b>"
     if len(joined_df) >= 2 and x.nunique() > 1:
         slope, intercept = np.polyfit(x, y, 1)
         x_line = np.linspace(x.min(), x.max(), 100)
@@ -121,7 +105,6 @@ def build_comparison_scatter_with_regression(
                 line=dict(color="black", dash="dash"),
             )
         )
-
         r_value = x.corr(y)
         r_squared = None if pd.isna(r_value) else float(r_value ** 2)
         annotation_text = (
@@ -146,7 +129,6 @@ def build_comparison_scatter_with_regression(
         font=dict(size=18, color="black"),
         text=annotation_text,
     )
-
     fig.update_layout(
         xaxis_title="incoming fab_value",
         yaxis_title="target fab_value",
@@ -163,22 +145,17 @@ def build_outlier_scatter(
     y_col: str,
     title: str,
 ) -> go.Figure:
-    # 제어용 scatterplot은 outlier_status 기준으로 색상을 고정한다.
-    # upper_out / lower_out은 red, normal은 lightgrey로 표시해 시인성을 높인다.
+    """outlier 상태를 색으로 구분한 추세 산점도를 만든다."""
     working_df = df.copy() if df is not None else pd.DataFrame()
     if working_df.empty or x_col not in working_df.columns or y_col not in working_df.columns:
-        fig = go.Figure()
-        fig.update_layout(title=title)
-        fig.add_annotation(text="No data", x=0.5, y=0.5, showarrow=False)
-        return fig
+        return _build_empty_figure(title)
 
     if "outlier_status" not in working_df.columns:
         working_df["outlier_status"] = "normal"
 
-    status_order = ["normal", "lower_out", "upper_out"]
     working_df["outlier_status"] = pd.Categorical(
         working_df["outlier_status"],
-        categories=status_order,
+        categories=["normal", "lower_out", "upper_out"],
         ordered=True,
     )
 
@@ -192,13 +169,95 @@ def build_outlier_scatter(
             "lower_out": "red",
             "upper_out": "red",
         },
-        category_orders={"outlier_status": status_order},
+        category_orders={"outlier_status": ["normal", "lower_out", "upper_out"]},
         title=title,
     )
     fig.update_layout(
         xaxis_title=x_col,
         yaxis_title=y_col,
         legend_title="Outlier",
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return fig
+
+
+def build_judged_trend_scatter(
+    df: pd.DataFrame,
+    *,
+    x_col: str,
+    y_col: str,
+    judge_col: str,
+    title: str,
+    color_map: dict[str, str],
+    category_order: list[str],
+) -> go.Figure:
+    """판정 결과를 색으로 구분한 추세 산점도를 만든다."""
+    working_df = df.copy() if df is not None else pd.DataFrame()
+    if working_df.empty or x_col not in working_df.columns or y_col not in working_df.columns:
+        return _build_empty_figure(title)
+
+    if judge_col not in working_df.columns:
+        working_df[judge_col] = category_order[0]
+
+    working_df[judge_col] = pd.Categorical(
+        working_df[judge_col],
+        categories=category_order,
+        ordered=True,
+    )
+
+    fig = px.scatter(
+        working_df.sort_values(x_col),
+        x=x_col,
+        y=y_col,
+        color=judge_col,
+        color_discrete_map=color_map,
+        category_orders={judge_col: category_order},
+        title=title,
+    )
+    fig.update_layout(
+        xaxis_title=x_col,
+        yaxis_title=y_col,
+        legend_title=judge_col,
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return fig
+
+
+def build_target_control_boxplot(
+    df: pd.DataFrame,
+    *,
+    title: str,
+    target_col: str = "fab_value",
+    controlled_col: str = "dpm_controlled_value",
+) -> go.Figure:
+    """target과 보정값 분포를 비교하는 box plot을 만든다."""
+    working_df = df.copy() if df is not None else pd.DataFrame()
+    if working_df.empty or target_col not in working_df.columns or controlled_col not in working_df.columns:
+        return _build_empty_figure(title)
+
+    box_df = pd.DataFrame(
+        {
+            "Target": pd.to_numeric(working_df[target_col], errors="coerce"),
+            "DPM Controlled": pd.to_numeric(working_df[controlled_col], errors="coerce"),
+        }
+    ).melt(var_name="series", value_name="value").dropna(subset=["value"])
+
+    if box_df.empty:
+        return _build_empty_figure(title)
+
+    fig = px.box(
+        box_df,
+        x="series",
+        y="value",
+        color="series",
+        color_discrete_map={"Target": "green", "DPM Controlled": "red"},
+        title=title,
+        points=False,
+    )
+    fig.update_layout(
+        xaxis_title="series",
+        yaxis_title="value",
+        showlegend=False,
         margin=dict(l=20, r=20, t=50, b=20),
     )
     return fig
